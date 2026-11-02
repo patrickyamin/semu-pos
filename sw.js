@@ -1,4 +1,4 @@
-const CACHE = 'semupos-v1';
+const CACHE = 'semupos-v2';
 const ASSETS = ['./', './index.html', './app.css', './catalog.js', './app.js', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
 
 self.addEventListener('install', (event) => {

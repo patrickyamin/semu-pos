@@ -7,7 +7,9 @@ const SYNC_DEFAULTS = {
   url: 'https://delprygcvapmmgswxjos.supabase.co',
   key: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRlbHByeWdjdmFwbW1nc3d4am9zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk2MzczNDksImV4cCI6MjEwNTIxMzM0OX0.dK6OoZEA0eK1HSeH8geiZvj31IEWtgg2ePjXV8uAI3U'
 };
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
+// Buy 3 get 1 free on 50ml bottles, any mix of scents. Toggle in Settings > Selling.
+const PROMO = { size: '50ml', buy: 3, free: 1, label: 'Buy 3 get 1 free' };
 
 const $ = (sel, root) => (root || document).querySelector(sel);
 const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
@@ -172,6 +174,7 @@ function defaultDB() {
     },
     qris: null,
     prefs: {
+      promo: true,
       allowNegativeStock: false,
       lowStock: 2,
       paperWidth: 58,
@@ -548,6 +551,32 @@ function lineDiscount(l) {
 function lineTotal(l) {
   return Math.max(0, lineGross(l) - lineDiscount(l));
 }
+function promoOn() {
+  return db.prefs.promo !== false;
+}
+function promoEligibleCount() {
+  return cart.reduce((s, l) => s + (l.size === PROMO.size ? l.qty : 0), 0);
+}
+// Per cart line: how many units are free and what they're worth. Cheapest bottles go free first.
+function cartPromo() {
+  const lines = cart.map(() => ({ free: 0, amount: 0 }));
+  if (!promoOn()) return lines;
+  const units = [];
+  cart.forEach((l, i) => {
+    if (l.size !== PROMO.size || !l.qty) return;
+    const unit = Math.round(lineTotal(l) / l.qty);
+    for (let k = 0; k < l.qty; k++) units.push({ i: i, unit: unit });
+  });
+  const freeCount = Math.floor(units.length / (PROMO.buy + PROMO.free)) * PROMO.free;
+  units.sort((a, b) => a.unit - b.unit).slice(0, freeCount).forEach((u) => {
+    lines[u.i].free += 1;
+    lines[u.i].amount += u.unit;
+  });
+  return lines;
+}
+function promoDiscountValue() {
+  return cartPromo().reduce((s, x) => s + x.amount, 0);
+}
 function cartSubtotal() {
   return cart.reduce((s, l) => s + lineGross(l), 0);
 }
@@ -556,11 +585,11 @@ function cartItemDiscounts() {
 }
 function orderDiscountValue() {
   if (!cart.discount) return 0;
-  const base = cartSubtotal() - cartItemDiscounts();
+  const base = cartSubtotal() - cartItemDiscounts() - promoDiscountValue();
   return cart.discount.type === 'pct' ? Math.round(base * clamp(cart.discount.value, 0, 100) / 100) : Math.min(base, cart.discount.value || 0);
 }
 function cartTotal() {
-  return Math.max(0, cartSubtotal() - cartItemDiscounts() - orderDiscountValue());
+  return Math.max(0, cartSubtotal() - cartItemDiscounts() - promoDiscountValue() - orderDiscountValue());
 }
 function cartCount() {
   return cart.reduce((s, l) => s + l.qty, 0);
@@ -880,6 +909,7 @@ function renderCart() {
   content.hidden = false;
   cta.hidden = false;
 
+  const promo = cartPromo();
   $('#cart-list').innerHTML = cart.map((l, i) => {
     const p = getProduct(l.pid);
     const variant = [l.color, l.size].filter(Boolean).join(' / ');
@@ -888,8 +918,9 @@ function renderCart() {
       (p ? thumbHtml(p, 'li-thumb') : '<div class="li-thumb">' + esc(colorInitials(l.name)) + '</div>') +
       '<div class="row-main"><div class="row-title" style="font-size:16px">' + esc(l.name) + '</div>' +
       (variant ? '<div class="row-sub">' + esc(variant) + '</div>' : '') +
-      '<div class="li-price num">' + rp(l.price) + ' × ' + l.qty + (disc ? ' <span class="li-disc">−' + rp(disc) + '</span>' : '') + '</div></div>' +
-      '<div class="li-right"><div class="li-total num">' + rp(lineTotal(l)) + '</div>' +
+      '<div class="li-price num">' + rp(l.price) + ' × ' + l.qty + (disc ? ' <span class="li-disc">−' + rp(disc) + '</span>' : '') +
+      (promo[i].free ? ' <span class="li-disc" style="color:var(--green)">' + promo[i].free + ' free</span>' : '') + '</div></div>' +
+      '<div class="li-right"><div class="li-total num">' + rp(lineTotal(l) - promo[i].amount) + '</div>' +
       '<div class="stepper"><button type="button" data-step="-1" aria-label="Decrease"><svg class="ico"><use href="#i-minus"/></svg></button><span class="val">' + l.qty + '</span><button type="button" data-step="1" aria-label="Increase"><svg class="ico"><use href="#i-plus"/></svg></button></div></div>' +
       '</div>';
   }).join('');
@@ -923,6 +954,9 @@ function renderCart() {
   });
 
   const od = orderDiscountValue();
+  const promoAmt = promo.reduce((s, x) => s + x.amount, 0);
+  const promoFree = promo.reduce((s, x) => s + x.free, 0);
+  const promoNext = promoOn() && promoEligibleCount() % (PROMO.buy + PROMO.free) === PROMO.buy;
   $('#cart-discount-row').innerHTML = '<button type="button" class="row tappable" id="discount-row-btn">' +
     '<div class="row-icon"><svg class="ico"><use href="#i-tag"/></svg></div>' +
     '<div class="row-main"><div class="row-title">Order discount</div>' +
@@ -934,7 +968,9 @@ function renderCart() {
   $('#cart-summary').innerHTML =
     '<div class="row"><div class="row-main"><div class="row-title">Subtotal</div></div><div class="row-value num">' + rp(cartSubtotal()) + '</div></div>' +
     (cartItemDiscounts() ? '<div class="row"><div class="row-main"><div class="row-title">Item discounts</div></div><div class="row-value num" style="color:var(--red)">−' + rp(cartItemDiscounts()) + '</div></div>' : '') +
-    (od ? '<div class="row"><div class="row-main"><div class="row-title">Order discount</div></div><div class="row-value num" style="color:var(--red)">−' + rp(od) + '</div></div>' : '') +
+    (promoAmt ? '<div class="row"><div class="row-main"><div class="row-title">' + PROMO.label + '</div><div class="row-sub">' + PROMO.size + ' · ' + promoFree + ' free</div></div><div class="row-value num" style="color:var(--green)">−' + rp(promoAmt) + '</div></div>' : '') +
+    (promoNext ? '<div class="row"><div class="row-main"><div class="row-title" style="color:var(--green)">Add 1 more ' + PROMO.size + ', it\'s free</div><div class="row-sub">' + PROMO.label + '</div></div></div>' : '') +
+    (od ?'<div class="row"><div class="row-main"><div class="row-title">Order discount</div></div><div class="row-value num" style="color:var(--red)">−' + rp(od) + '</div></div>' : '') +
     '<div class="row"><div class="row-main"><div class="row-title" style="font-weight:700;font-size:19px">Total</div></div><div class="row-value strong num" style="font-size:22px;letter-spacing:-0.02em">' + rp(cartTotal()) + '</div></div>';
 
   $('#checkout-btn').textContent = 'Checkout · ' + rp(cartTotal());
@@ -1015,7 +1051,7 @@ function openCartItemSheet(idx) {
 }
 
 function openOrderDiscountSheet() {
-  const base = cartSubtotal() - cartItemDiscounts();
+  const base = cartSubtotal() - cartItemDiscounts() - promoDiscountValue();
   const current = cart.discount ? cart.discount.value : 0;
   openAmountSheet('Order discount', rp(base) + ' before discount', current, {
     allowPercent: true,
@@ -1180,18 +1216,23 @@ function nextReceiptNo() {
 function completeSale(method, received) {
   const subtotal = cartSubtotal();
   const itemDisc = cartItemDiscounts();
+  const promo = cartPromo();
+  const promoDisc = promo.reduce((s, x) => s + x.amount, 0);
   const orderDisc = orderDiscountValue();
   const total = cartTotal();
-  const items = cart.map((l) => ({
+  // Free bottles are saved as part of each line's discount so reports and exports net them out.
+  const items = cart.map((l, i) => ({
     pid: l.pid,
     name: l.name,
     color: l.color,
     size: l.size,
     price: l.price,
     qty: l.qty,
-    disc: l.disc ? lineDiscount(l) : 0,
+    disc: (l.disc ? lineDiscount(l) : 0) + promo[i].amount,
     discRaw: l.disc,
-    total: lineTotal(l)
+    free: promo[i].free,
+    promo: promo[i].amount,
+    total: Math.max(0, lineTotal(l) - promo[i].amount)
   }));
   invalidateStock();
   const sale = {
@@ -1201,7 +1242,8 @@ function completeSale(method, received) {
     day: dayKey(Date.now()),
     items: items,
     subtotal: subtotal,
-    itemDiscount: itemDisc,
+    itemDiscount: itemDisc + promoDisc,
+    promoDiscount: promoDisc,
     orderDiscount: orderDisc,
     orderDiscountRaw: cart.discount || null,
     total: total,
@@ -1264,7 +1306,7 @@ function showSuccess(sale) {
 function saleLineRows(sale) {
   return sale.items.map((it) => {
     const variant = [it.color, it.size].filter(Boolean).join(' / ');
-    return { name: it.name, variant: variant, qty: it.qty, price: it.price, disc: it.disc, total: it.total };
+    return { name: it.name, variant: variant, qty: it.qty, price: it.price, disc: (it.disc || 0) - (it.promo || 0), free: it.free || 0, total: it.total };
   });
 }
 
@@ -1277,12 +1319,13 @@ function receiptHtml(sale) {
     '<div class="receipt-meta"><span>#' + esc(sale.no) + '</span><span>' + fmtDate(sale.ts) + ' · ' + fmtTime(sale.ts) + '</span></div>' +
     '<hr class="receipt-hr">' +
     rows.map((r) =>
-      '<div class="receipt-line"><div class="name">' + esc(r.name) + (r.variant ? '<div class="receipt-line sub"><span>' + esc(r.variant) + '</span></div>' : '') + '<div class="receipt-line sub"><span>' + r.qty + ' × ' + rp(r.price) + (r.disc ? ' · disc −' + rp(r.disc) : '') + '</span></div></div>' +
+      '<div class="receipt-line"><div class="name">' + esc(r.name) + (r.variant ? '<div class="receipt-line sub"><span>' + esc(r.variant) + '</span></div>' : '') + '<div class="receipt-line sub"><span>' + r.qty + ' × ' + rp(r.price) + (r.free ? ' · ' + r.free + ' free' : '') + (r.disc ? ' · disc −' + rp(r.disc) : '') + '</span></div></div>' +
       '<div class="amt">' + rp(r.total) + '</div></div>'
     ).join('') +
     '<hr class="receipt-hr">' +
     '<div class="receipt-line"><span>Subtotal</span><span class="amt">' + rp(sale.subtotal) + '</span></div>' +
-    (sale.itemDiscount ? '<div class="receipt-line"><span>Item discounts</span><span class="amt">−' + rp(sale.itemDiscount) + '</span></div>' : '') +
+    (sale.itemDiscount - (sale.promoDiscount || 0) ? '<div class="receipt-line"><span>Item discounts</span><span class="amt">−' + rp(sale.itemDiscount - (sale.promoDiscount || 0)) + '</span></div>' : '') +
+    (sale.promoDiscount ? '<div class="receipt-line"><span>' + PROMO.label + '</span><span class="amt">−' + rp(sale.promoDiscount) + '</span></div>' : '') +
     (sale.orderDiscount ? '<div class="receipt-line"><span>Order discount</span><span class="amt">−' + rp(sale.orderDiscount) + '</span></div>' : '') +
     '<div class="receipt-line total"><span>Total</span><span class="amt">' + rp(sale.total) + '</span></div>' +
     '<div class="receipt-line"><span>' + payLabel(sale.method) + '</span><span class="amt">' + rp(sale.received) + '</span></div>' +
@@ -1365,11 +1408,13 @@ function receiptText(sale, width) {
     wrapText(it.name, w).forEach((l) => out.push(l));
     if (variant) out.push('  ' + variant);
     out.push(lr('  ' + it.qty + ' x ' + rp(it.price), rp(it.total), w));
-    if (it.disc) out.push(lr('  item disc', '-' + rp(it.disc), w));
+    if (it.free) out.push(lr('  ' + it.free + ' free (3+1)', '-' + rp(it.promo || 0), w));
+    if ((it.disc || 0) - (it.promo || 0)) out.push(lr('  item disc', '-' + rp(it.disc - (it.promo || 0)), w));
   });
   out.push('-'.repeat(w));
   out.push(lr('Subtotal', rp(sale.subtotal), w));
-  if (sale.itemDiscount) out.push(lr('Item disc', '-' + rp(sale.itemDiscount), w));
+  if (sale.itemDiscount - (sale.promoDiscount || 0)) out.push(lr('Item disc', '-' + rp(sale.itemDiscount - (sale.promoDiscount || 0)), w));
+  if (sale.promoDiscount) out.push(lr('Promo 3+1', '-' + rp(sale.promoDiscount), w));
   if (sale.orderDiscount) out.push(lr('Order disc', '-' + rp(sale.orderDiscount), w));
   out.push(lr('TOTAL', rp(sale.total), w));
   out.push(lr(payLabel(sale.method), rp(sale.received), w));
@@ -2013,6 +2058,7 @@ function renderSettings() {
     '</div>';
 
   const selling = $('#selling-list', body);
+  selling.appendChild(toggleRow(PROMO.label + ' (' + PROMO.size + ')', promoOn(), (v) => { db.prefs.promo = v; save(); renderCart(); }, 'Every 4th ' + PROMO.size + ' bottle in a sale is free, any mix of scents'));
   selling.appendChild(toggleRow('Sell below zero stock', db.prefs.allowNegativeStock, (v) => { db.prefs.allowNegativeStock = v; save(); renderGrid(); }, 'Allow selling items that show 0 stock'));
   selling.appendChild(stepperRow('Low stock alert', db.prefs.lowStock, 0, 20, (v) => { db.prefs.lowStock = v; save(); renderGrid(); }, 'Highlight products with this much stock or less'));
 
